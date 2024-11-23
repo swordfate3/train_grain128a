@@ -1,10 +1,6 @@
 import time
 
 import numpy as np
-
-from train_grain128a import auth_mode
-
-
 class Grain128a:
     """
     Grain-128a流密码的NumPy实现

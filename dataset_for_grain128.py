@@ -5,8 +5,11 @@ import numpy as np
 STREAM_BYTES = 32
 MSG_BYTES = 0
 init_rounds = 0
-auth_mode = 0
-
+# 添加 认证模式相关常量
+MAC_SIZE = 32  # MAC长度为32位
+RATE = 1       # 每2个时钟周期处理1位消息
+# 修改现有常量
+auth_mode = 0  # 默认启用认证模式
 # Grain state structure
 class GrainState:
     def __init__(self):
@@ -27,19 +30,35 @@ class GrainData:
         for i in range(len(msg)):
             self.message[i] = msg[i]
         self.message[len(msg)] = 1  # always pad data with a 1
+#添加 认证相关函数
+def auth_accumulate(grain):
+    """更新认证累加器"""
+    for i in range(MAC_SIZE):
+        grain.auth_acc[i] ^= grain.auth_sr[i]
 
+def auth_shift(grain, fb_bit):
+    """认证移位寄存器移位"""
+    for i in range(MAC_SIZE-1, 0, -1):
+        grain.auth_sr[i] = grain.auth_sr[i-1]
+    grain.auth_sr[0] = fb_bit
+
+def generate_auth_fb(grain, message_bit):
+    """生成认证反馈值"""
+    if message_bit == 1:
+        auth_accumulate(grain)
+    z = next_z(grain)  # 获取下一个密钥流比特
+    auth_shift(grain, z)
+    return z
+
+# 4修改
 def init_grain(grain, key, iv):
     global auth_mode
-    # Initialize LFSR with IV
-    for i in range(12):
+    # Initialize LFSR with IV (128 bits)
+    for i in range(16):
         for j in range(8):
             grain.lfsr[8 * i + j] = (iv[i] >> (7 - j)) & 1
-    grain.lfsr[96:127] = 1
-    grain.lfsr[127] = 0
-    if grain.lfsr[0] == 1:
-        auth_mode = 1
 
-    # Initialize NFSR with key
+    # Initialize NFSR with key (128 bits)
     for i in range(16):
         for j in range(8):
             grain.nfsr[8 * i + j] = (key[i] >> (7 - j)) & 1
@@ -48,17 +67,24 @@ def init_grain(grain, key, iv):
     grain.auth_acc.fill(0)
     grain.auth_sr.fill(0)
 
+
+# 1修改
 def next_lfsr_fb(grain):
-    return grain.lfsr[96] ^ grain.lfsr[81] ^ grain.lfsr[70] ^ grain.lfsr[38] ^ grain.lfsr[7] ^ grain.lfsr[0]
-
+    return (grain.lfsr[96] ^ grain.lfsr[81] ^ grain.lfsr[70] ^
+            grain.lfsr[38] ^ grain.lfsr[7] ^ grain.lfsr[0])
+# 2修改
 def next_nfsr_fb(grain):
-    return grain.nfsr[96] ^ grain.nfsr[91] ^ grain.nfsr[56] ^ grain.nfsr[26] ^ grain.nfsr[0] ^ (
-                grain.nfsr[84] & grain.nfsr[68]) ^ \
-        (grain.nfsr[67] & grain.nfsr[3]) ^ (grain.nfsr[65] & grain.nfsr[61]) ^ (grain.nfsr[59] & grain.nfsr[27]) ^ \
-        (grain.nfsr[48] & grain.nfsr[40]) ^ (grain.nfsr[18] & grain.nfsr[17]) ^ (grain.nfsr[13] & grain.nfsr[11]) ^ \
-        (grain.nfsr[82] & grain.nfsr[78] & grain.nfsr[70]) ^ (grain.nfsr[25] & grain.nfsr[24] & grain.nfsr[22]) ^ \
-        (grain.nfsr[95] & grain.nfsr[93] & grain.nfsr[92] & grain.nfsr[88])
+    return (grain.nfsr[127] ^ grain.nfsr[96] ^ grain.lfsr[0] ^
+            (grain.nfsr[26] & grain.nfsr[56]) ^ (grain.nfsr[91] & grain.nfsr[96]) ^
+            (grain.nfsr[3] & grain.nfsr[67]) ^ (grain.nfsr[11] & grain.nfsr[13]) ^
+            (grain.nfsr[17] & grain.nfsr[18]) ^ (grain.nfsr[27] & grain.nfsr[59]) ^
+            (grain.nfsr[40] & grain.nfsr[48]) ^ (grain.nfsr[61] & grain.nfsr[65]) ^
+            (grain.nfsr[68] & grain.nfsr[84]) ^
+            (grain.nfsr[22] & grain.nfsr[24] & grain.nfsr[25]) ^
+            (grain.nfsr[70] & grain.nfsr[78] & grain.nfsr[82]) ^
+            (grain.nfsr[88] & grain.nfsr[92] & grain.nfsr[93] & grain.nfsr[95]))
 
+#3修改
 # def output_function(self, lfsr, nfsr):
 def next_h(grain):
     return (grain.nfsr[12] & grain.lfsr[8]) ^ (grain.lfsr[13] & grain.lfsr[20]) ^ (
@@ -77,18 +103,14 @@ def auth_shift(sr, fb):
 
 def accumulate(grain):
     grain.auth_acc ^= grain.auth_sr
-
+# 5修改
 def next_z(grain):
     lfsr_fb = next_lfsr_fb(grain)
     nfsr_fb = next_nfsr_fb(grain)
     h_out = next_h(grain)
 
-    A = [2, 15, 36, 45, 64, 73, 89]
-    nfsr_tmp = 0
-    for a in A:
-        nfsr_tmp ^= grain.nfsr[a]
-
-    y = h_out ^ grain.lfsr[93] ^ nfsr_tmp
+    y = h_out ^ grain.lfsr[93] ^ grain.nfsr[2] ^ grain.nfsr[15] ^ grain.nfsr[36] ^ grain.nfsr[45] ^ grain.nfsr[64] ^ \
+        grain.nfsr[73] ^ grain.nfsr[89]
 
     if init_rounds:
         lfsr_out = shift(grain.lfsr, lfsr_fb ^ y)
@@ -313,7 +335,7 @@ def draw_random_nonces(n_samples):
 import time
 import sys
 if __name__ == "__main__":
-    grain128a = GrainState()
+    grain128a = GrainState(False)
     n_train_samples = 1000
     # n_val_samples = 1
     in_diff = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1, 0, 0]
