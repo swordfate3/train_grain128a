@@ -9,7 +9,7 @@ init_rounds = 0
 MAC_SIZE = 32  # MAC长度为32位
 RATE = 1       # 每2个时钟周期处理1位消息
 # 修改现有常量
-auth_mode = 0  # 默认启用认证模式
+auth_mode = 1  # 默认启用认证模式
 # Grain state structure
 class GrainState:
     def __init__(self):
@@ -52,18 +52,26 @@ def generate_auth_fb(grain, message_bit):
 
 # 4修改
 def init_grain(grain, key, iv):
-    global auth_mode
-    # Initialize LFSR with IV (128 bits)
-    for i in range(16):
+    """
+        初始化 Grain-128a
+        key: 128位密钥 (16字节)
+        iv:  96位 IV (12字节)
+        """
+    # 初始化 LFSR (96位 IV + 32位1)
+    for i in range(12):  # 12字节 = 96位
         for j in range(8):
             grain.lfsr[8 * i + j] = (iv[i] >> (7 - j)) & 1
 
-    # Initialize NFSR with key (128 bits)
-    for i in range(16):
+    # 填充剩余32位为1
+    for i in range(96, 128):
+        grain.lfsr[i] = 1
+
+    # 初始化 NFSR (128位密钥)
+    for i in range(16):  # 16字节 = 128位
         for j in range(8):
             grain.nfsr[8 * i + j] = (key[i] >> (7 - j)) & 1
 
-    # Initialize authentication accumulator and shift register
+    # 初始化认证寄存器
     grain.auth_acc.fill(0)
     grain.auth_sr.fill(0)
 
@@ -74,15 +82,19 @@ def next_lfsr_fb(grain):
             grain.lfsr[38] ^ grain.lfsr[7] ^ grain.lfsr[0])
 # 2修改
 def next_nfsr_fb(grain):
-    return (grain.nfsr[127] ^ grain.nfsr[96] ^ grain.lfsr[0] ^
-            (grain.nfsr[26] & grain.nfsr[56]) ^ (grain.nfsr[91] & grain.nfsr[96]) ^
-            (grain.nfsr[3] & grain.nfsr[67]) ^ (grain.nfsr[11] & grain.nfsr[13]) ^
-            (grain.nfsr[17] & grain.nfsr[18]) ^ (grain.nfsr[27] & grain.nfsr[59]) ^
-            (grain.nfsr[40] & grain.nfsr[48]) ^ (grain.nfsr[61] & grain.nfsr[65]) ^
+    return (grain.nfsr[96] ^ grain.lfsr[0] ^ grain.nfsr[0] ^
+            (grain.nfsr[26] & grain.nfsr[56]) ^
+            (grain.nfsr[91] & grain.nfsr[96]) ^
+            (grain.nfsr[3] & grain.nfsr[67]) ^
+            (grain.nfsr[11] & grain.nfsr[13]) ^
+            (grain.nfsr[17] & grain.nfsr[18]) ^
+            (grain.nfsr[27] & grain.nfsr[59]) ^
+            (grain.nfsr[40] & grain.nfsr[48]) ^
+            (grain.nfsr[61] & grain.nfsr[65]) ^
             (grain.nfsr[68] & grain.nfsr[84]) ^
+            (grain.nfsr[88] & grain.nfsr[92] & grain.nfsr[93] & grain.nfsr[95]) ^
             (grain.nfsr[22] & grain.nfsr[24] & grain.nfsr[25]) ^
-            (grain.nfsr[70] & grain.nfsr[78] & grain.nfsr[82]) ^
-            (grain.nfsr[88] & grain.nfsr[92] & grain.nfsr[93] & grain.nfsr[95]))
+            (grain.nfsr[70] & grain.nfsr[78] & grain.nfsr[82]))
 
 #3修改
 # def output_function(self, lfsr, nfsr):
@@ -203,14 +215,19 @@ def make_train_data(
     # # 设置 NumPy 打印选项，确保打印出所有元素,每行元素不换行
     # np.set_printoptions(threshold=np.inf, linewidth=np.inf)
     # generate labels
+    #7-----修改
+    if len(diff) != 12:  # 确保差分长度为12字节（96位）
+        raise ValueError("差分长度必须为12字节（96位）")
+    # 生成标签
     if y is None:
         y = np.frombuffer(urandom(n_samples), dtype=np.uint8) & 1
     elif y == 0 or y == 1:
         y = np.array([y for _ in range(n_samples)], dtype=np.uint8)
-    # draw keys and plaintexts , 目前 keys 和 iv0 都是 n_sample 列 （正常情况）
+
+    # 生成密钥和 IV
     keys = draw_keys(n_samples)
     iv0 = draw_nonces(n_samples)
-
+    #-----修改
     # 下面的代码将 keys 和 iv0 都转为 n_sample 行了（为了按行遍历 iv0 ，将其与密钥 keys 按行共同存入 grain 内部状态中）
     keys = keys.transpose()
     iv0 = iv0.transpose()
@@ -311,33 +328,27 @@ def draw_keys(n_samples):
         np.frombuffer(urandom(16 * n_samples), dtype=np.uint8),
         (16, n_samples)
     )
-
+#5修改
 def draw_nonces(n_samples):
+    """生成随机的 IV (96位 = 12字节)"""
     nonces = np.reshape(
         np.frombuffer(urandom(12 * n_samples), dtype=np.uint8),
         (12, n_samples)
     )
-    # 创建一个可写的副本
-    nonces = np.copy(nonces)
-    # 设置 nonces 为可写
-    nonces.setflags(write=True)
-    # 将每个 nonce 的第一个字节的最高位（第一个比特）设置为 0
-    nonces[0] &= 0x7F # 0x7F 是二进制 0111 1111，按位与运算会将最高位变为 0
     return nonces
-
+#6修改
 def draw_random_nonces(n_samples):
-    random_nonces = np.reshape(np.frombuffer(urandom(12 * n_samples), dtype=np.uint8), (12, n_samples))
-    # random_nonces = random_nonces.transpose()
-    # print("Here shape of random_nonces:", random_nonces.shape)
-    return random_nonces
-    # return draw_nonces(n_samples)
+    """生成随机的 IV (96位 = 12字节)"""
+    return draw_nonces(n_samples)
 
 import time
 import sys
 if __name__ == "__main__":
-    grain128a = GrainState(False)
+    grain128a = GrainState()
     n_train_samples = 1000
     # n_val_samples = 1
+    #8修改
+    # 差分向量需要是12字节（96位）
     in_diff = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1, 0, 0]
     rounds = int(sys.argv[1])
     fx = open('data.txt','a')
